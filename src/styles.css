@@ -1,0 +1,62 @@
+@import 'tailwindcss';
+
+/* Registry paper, not the warm-cream default. One violet for interaction, one
+   stamp red held back for real urgency. The six compliance states are colours
+   in their own right because the whole UI branches on them. */
+@theme {
+  --color-paper: #eef1f4;
+  --color-surface: #ffffff;
+  --color-ink: #131a22;
+  --color-slate: #5a6875;
+  --color-rule: #d6dce2;
+  --color-notary: #4a3aa8;
+  --color-notary-soft: #ece9f9;
+
+  --color-state-satisfied: #1f6f52;
+  --color-state-pending: #5a6875;
+  --color-state-missing: #8a6a17;
+  --color-state-expiring_soon: #b8791c;
+  --color-state-expired: #a61b2b;
+  --color-state-rejected: #7a1e5c;
+
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-sans: 'Inter Tight', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-rule);
+  }
+
+  body {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-notary);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* The margin rail: a citation or a timestamp set beside the claim it backs,
+   like a marginal note. Collapses under the claim on narrow screens. */
+.rail {
+  border-left: 2px solid var(--color-rule);
+  padding-left: 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--color-slate);
+}
