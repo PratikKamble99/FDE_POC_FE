@@ -63,6 +63,11 @@ export function CredentialPage() {
           </>
         }
         actions={
+          // No gate here on purpose. `reverify` declares no `require_scope`, and
+          // both routes resolve the credential the same way — a clinician who
+          // could not load this page could not reverify it either. Gating on
+          // `credentials:verify` would hide the button from a clinician acting
+          // on their own record, which the API expressly allows.
           <Button onClick={() => reverify.mutate()} disabled={reverify.isPending || superseded}>
             {reverify.isPending ? 'Checking…' : 'Check the authority again'}
           </Button>

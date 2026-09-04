@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { AxiosError, AxiosHeaders } from 'axios'
 import { normalizeError } from './api'
 import { isTerminal } from './useJobStream'
+import { hasScope } from './scopes'
 import { ledgerFromCredential } from '@/components/VerificationLedger'
 import type { Credential } from './types'
 
@@ -55,6 +56,39 @@ describe('isTerminal', () => {
   it('keeps the stream open on progress steps', () => {
     for (const step of ['queued', 'd4_ocr', 'd4_government_api', 'd3_compose']) {
       expect(isTerminal({ step })).toBe(false)
+    }
+  })
+})
+
+describe('hasScope', () => {
+  // These four cells moved when the backend rewrote ROLE_SCOPES and are what
+  // the nav and the approve button branch on. If scopes.py changes again, this
+  // is the thing that should fail rather than a 403 in front of a user.
+  it('grants users:create to admin alone', () => {
+    // That route can create a compliance officer, and that role holds
+    // compliance:report — a scope HR is denied. Granting it to HR would be an
+    // escalation by proxy, which is why it was removed from HR on 2026-09-01.
+    expect(hasScope('admin', 'users:create')).toBe(true)
+    expect(hasScope('hr', 'users:create')).toBe(false)
+    expect(hasScope('compliance_officer', 'users:create')).toBe(false)
+  })
+
+  it('denies hr compliance:report', () => {
+    expect(hasScope('hr', 'compliance:report')).toBe(false)
+    expect(hasScope('compliance_officer', 'compliance:report')).toBe(true)
+    expect(hasScope('admin', 'compliance:report')).toBe(true)
+  })
+
+  it('gives super_admin no compliance, credential or document scope', () => {
+    for (const scope of ['compliance:read', 'credentials:read', 'documents:read']) {
+      expect(hasScope('super_admin', scope)).toBe(false)
+    }
+    expect(hasScope('super_admin', 'organizations:update')).toBe(true)
+  })
+
+  it('gives every in-org role compliance:read — so scope alone never gates a report', () => {
+    for (const role of ['admin', 'compliance_officer', 'hr', 'clinician'] as const) {
+      expect(hasScope(role, 'compliance:read')).toBe(true)
     }
   })
 })

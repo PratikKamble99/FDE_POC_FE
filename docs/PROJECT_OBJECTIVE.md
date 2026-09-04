@@ -72,14 +72,25 @@ Upload credential document
   → embed & retrieve the matching policy
   → Verification Agent cross-checks extracted fields vs policy
   → Government API confirms the credential is genuine & active
-  → Report Agent writes the compliance record
+  → Report Agent writes the compliance record — only if gaps remain
+  → a human approves it
   → Notify HR via Email/HRMS
 ```
+
+Two qualifications on the last three steps, both of them load-bearing:
+
+- **The report step is conditional.** The upload that closes a clinician's last gap is the common
+  one, and it writes no report — a document saying everybody is fine still costs somebody an
+  approval. See [AGENTS.md §5](AGENTS.md).
+- **Approval is not a step the pipeline performs.** It ends at a
+  `compliance_reports` row in `pending_approval`, and stops. Delivery is a separate job, gated on a
+  person having set `approved_by` — see §7 below.
 
 Every step runs inside the security wrapper (auth → RBAC → PHI redaction on
 the way in; citation/hallucination check → PHI mask → audit log on the way
 out) and is traced end to end. The conversational flows reuse the same
-services against records this pipeline has already indexed.
+services against records this pipeline has already indexed — and one of them,
+"generate a compliance report", now enters this pipeline at the report step.
 
 ---
 
@@ -148,14 +159,22 @@ Three distinct layers; no single one covers everything:
 | 1 | *"Is this nursing license expired?"* | History lookup → stored expiry → optional live registry re-check → cited answer |
 | 2 | *"Compare the uploaded certificate with government records."* | Load extracted fields → fetch authoritative record → field-level diff → each match/mismatch cited |
 | 3 | *"Show missing credentials for Dr. John."* | Load clinician role & history → retrieve required credential set from policy → diff → gaps + expiries |
-| 4 | *"Generate compliance report."* | Load org roster & verification states → retrieve applicable regulations → assemble per clinician → **officer approves** → deliver via HRMS/Email → audit |
+| 4 | *"Generate compliance report."* | Asked through `/chat`, refused to any role without `compliance:report` → Compliance Agent evaluates the roster (or one named clinician) → prose drafted, every figure copied → `compliance_reports` at `pending_approval` → **officer approves** → deliver via HRMS/Email → audit |
+
+Flow 4 is the only conversational ask that writes anything. It is the exception the chat surface
+carries deliberately — *"generate a report"* is a request, not a question, and answering it with a
+description of how to generate one would be pedantry. The guards that make it safe are in
+[CHAT_ORCHESTRATION.md §8](CHAT_ORCHESTRATION.md).
 
 ---
 
 ## 7. Guardrails and non-goals
 
 - **Nothing outbound without a human.** Compliance reports and notifications
-  to HR are drafted by the system and released by a compliance officer.
+  to HR are drafted by the system and released by a compliance officer. This is
+  structural rather than a rule: the Report Agent declares no `send` capability,
+  so no agent — and nothing reachable from `/chat` — has a code path to deliver
+  anything. Delivery lives in a task gated on `approved_by`.
 - **No uncited compliance claim.** Every requirement, match and mismatch
   points at a source: a policy chunk, an extracted document field, or an
   authoritative registry response.

@@ -2,10 +2,14 @@
 
 Every model call in this system goes through one method. This document is about what sits under it.
 
-`ModelRouter.structured()` ([model_router.py](../app/d3_agents/model_router.py)) has five call sites —
-`document.classify`, `document.reconcile`, `verification.explain`, and the orchestrator's `plan` and
-`compose`. It is the only way out to a model, and there is no free-text path: everything an agent
-asks for has a known answer shape.
+`ModelRouter.structured()` ([model_router.py](../app/d3_agents/model_router.py)) is called by
+`verification.explain`, `report.compose`, and the orchestrator's planning nodes. It is the only way
+out to a model from D3, and there is no free-text path: everything an agent asks for has a known
+answer shape.
+
+The one model call that does *not* go through it is the OCR vision pass, which lives in D4 behind the
+`ocr` connector — it reads a document rather than reasoning about one, so it is a connector like any
+other external service, swapped by `OCR_MODE` rather than by `LLM_VENDOR`.
 
 That chokepoint used to be Anthropic-specific. It is now a **dispatcher**: resolve the tier, resolve
 who serves that tier, hand off to a provider that owns the vendor's wire shape.
@@ -75,7 +79,7 @@ LLM_VENDOR=anthropic
 DEEP_VENDOR=openai
 ```
 
-→ `classify` and `plan` run on Haiku; `reconcile`, `explain` and `compose` run on GPT.
+→ `plan` runs on Haiku; `explain` and `compose` run on GPT.
 
 ---
 
@@ -175,21 +179,16 @@ Three rules behind that:
 
 ---
 
-## 6. `model_for()`, and why it exists
+## 6. `model_for()`
 
-`document_checks.model` records which model produced a `type_match` check. It used to read
-`settings.model_fast` directly, which with per-vendor models would write `claude-haiku-4-5` into a row
-GPT actually produced.
+`model_for()` resolves the pin and the vendor exactly as `structured()` does, and returns the model
+name that would run, or `None` under a DETERMINISTIC pin. It exists for audit columns like
+`document_checks.model`: naming a model that did not run is worse than naming none, so a row asks who
+would answer rather than reading `settings.model_fast` and guessing the vendor.
 
-That column is audit evidence. Naming a model that did not run is worse than naming none — so the
-agent asks the router:
-
-```python
-"model": self._router.model_for(ModelTier.FAST),
-```
-
-`model_for()` resolves the pin and the vendor exactly as `structured()` does, and returns `None` under
-a DETERMINISTIC pin — already the value that column takes for checks with no model behind them.
+It currently has **no production caller.** The Document Agent's `type_match` check was its one user,
+and that check now names the OCR connector's own vision model — reported by the connector, since it
+is the thing that ran. Delete `model_for()` if nothing claims it before the next audit column lands.
 
 ---
 

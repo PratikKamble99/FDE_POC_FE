@@ -15,9 +15,13 @@ import { cn } from '@/lib/cn'
 export function PipelineStepper({
   jobId,
   onDone,
+  labels,
 }: {
   jobId: string | null
   onDone?: (output: unknown) => void
+  /** Per-step overrides. Policy ingestion publishes every step as `d1_rag`,
+   *  where "Retrieving policy" describes the wrong direction of travel. */
+  labels?: Record<string, string>
 }) {
   const { events, streaming, output, error } = useJobStream(jobId)
 
@@ -54,7 +58,7 @@ export function PipelineStepper({
               )}
             </span>
             <span className={failed ? 'text-state-expired' : 'text-ink'}>
-              {STEP_LABELS[event.step] ?? event.step}
+              {labels?.[event.step] ?? STEP_LABELS[event.step] ?? event.step}
             </span>
             {(event.detail || event.message) && (
               <span className="text-xs text-slate">{event.detail ?? event.message}</span>

@@ -29,7 +29,7 @@ flowchart LR
 
 | Agent | Question it answers | Uses an LLM? | May call | Never |
 |---|---|---|---|---|
-| **Document** | "What does this file say?" | Yes — cheap classify, strong reconcile | D2, D4 | Verify against a registry · decide compliance · send |
+| **Document** | "What does this file say?" | Yes — one vision pass, in D4 | D2, D4 | Verify against a registry · decide compliance · send |
 | **Verification** | "Is this credential genuine and active?" | Only to narrate a mismatch | D2, D4 | Call D1 · decide org-wide compliance · send |
 | **Compliance** | "Does this clinician hold everything required?" | **No** | D2 | Call D4 · read a document · any external API |
 | **Report** | "What do we tell HR?" | Yes — prose only | D2, Compliance | **Send** · recompute compliance |
@@ -58,8 +58,8 @@ keeping the two apart is what lets the audit trail separate *what was claimed* f
 authority confirmed*.
 
 The uploader declares `clinician_id` and `credential_type` on the request — HR knows what they are
-uploading, and an authenticated human's assertion beats a model's guess. The agent's classification
-therefore **corroborates** that declaration rather than overriding it.
+uploading, and an authenticated human's assertion beats a model's guess. The type the OCR pass reads
+off the document therefore **corroborates** that declaration rather than overriding it.
 
 ### Flow
 
@@ -68,16 +68,13 @@ flowchart TD
     U["POST /documents/upload<br/>clinician_id · credential_type · file"] --> D1["credential_documents<br/>status: uploaded"]
     D1 --> T["Celery task → document.process"]
 
-    T --> E["1 · extract<br/>D4 ocr.extract_document → get_ocr_status"]
-    E --> C["2 · classify (Haiku)<br/>does the file match the declared type?"]
-    C --> R{"3 · any field<br/>low confidence?"}
-    R -- yes --> RC["reconcile (Opus)<br/>re-read those fields only"]
-    R -- no --> CK["4 · run the 5 checks"]
-    RC --> CK
+    T --> E["1 · extract<br/>D4 ocr.extract_document → get_ocr_status<br/>fields · confidence · observed_type"]
+    E --> M["2 · map_fields<br/>OCR fields → credential columns"]
+    M --> CK["3 · run the 5 checks"]
     CK --> S{"any check below<br/>its threshold?"}
     S -- yes --> PEND["review_status: pending<br/>→ human review queue"]
     S -- no --> OK["review_status: not_required"]
-    PEND --> W["5 · persist via D2"]
+    PEND --> W["4 · persist via D2"]
     OK --> W
     W --> OUT["ocr_results · document_checks<br/>credentials → pending_verification<br/>document → processed"]
     OUT --> V["→ Verification Agent"]
@@ -87,37 +84,37 @@ flowchart TD
 
 | Capability | In | Out | Model | Calls |
 |---|---|---|---|---|
-| `extract` | `credential_document_id`, `storage_uri` | `fields{}`, `confidence`, `ocr_job_id` | none | D4 |
-| `classify` | extracted text, `declared_credential_type` | `agrees`, `observed_type`, `confidence` | fast | — |
-| `reconcile` | low-confidence `fields{}` | corrected `fields{}`, `per_field_confidence{}` | deep | — |
-| `check` | `credential_document_id`, `fields{}` | `checks[]` | none | D4 |
+| `extract` | `credential_document_id`, `storage_uri` | `fields{}`, `confidence`, `observed_type`, `ocr_job_id` | none in D3 | D4 |
+| `check` | `confidence`, `mapped{}`, `observed_type` | `checks[]` | none | — |
 | `process` | `credential_document_id` | `credential_draft{}`, `checks[]` | — | D2, D4 |
 
-`process` is the composite the Celery task invokes; the other four are separately addressable so
+`process` is the composite the Celery task invokes; the other two are separately addressable so
 they can be tested and replayed on their own.
+
+**The Document Agent makes no model call of its own.** The one model in this flow is the vision pass
+inside the OCR connector, which reads the printed fields *and* answers `observed_type` in the same
+call — it is the only thing here that has seen the actual document. A second D3 model asked to
+re-read a field it never saw a pixel of cannot beat the pass that produced it, so there is no such
+step.
 
 **`process` is a LangGraph `StateGraph`** — the diagram above is its node graph, plus `load` and
 `persist` at either end for the two D2 calls. Its nodes *wrap* the capabilities rather than
 replacing them, which is what keeps each one individually invocable and keeps `CapabilityDef.calls`
-enforced. The only conditional edge is the low-confidence branch into `reconcile`; whether a
-credential row is built is a payload difference, decided inside `map_fields`. A node raising
-`DomainError` propagates to `BaseAgent.run` and becomes `AgentResult(ok=False)`, exactly as a linear
-call chain would.
+enforced. The graph is linear: whether a credential row is built, and whether a `type_match` check is
+raised, are payload differences decided inside `map_fields` and `check` rather than edges. A node
+raising `DomainError` propagates to `BaseAgent.run` and becomes `AgentResult(ok=False)`, exactly as a
+linear call chain would.
 
 There is no checkpointer. Resume-after-failure comes from Celery retry plus the idempotent writes in
 `record_document_result`.
-
-`reconcile` runs **only** on fields below the confidence floor. It is the one place a strong model
-earns its cost: OCR reading `1` as `l` in a licence number is exactly what makes a later registry
-lookup fail.
 
 ### The five checks
 
 | Check | Decided by | Pending when |
 |---|---|---|
 | `ocr_quality` | OCR's own reported confidence | `< 0.75` |
-| `type_match` | `classify` vs the declared `credential_type` | they disagree |
-| `field_completeness` | required fields for that credential type | any missing after `reconcile` |
+| `type_match` | OCR's `observed_type` vs the declared `credential_type` | they disagree |
+| `field_completeness` | required fields for that credential type | any missing |
 | `face_match` | `ocr.match_face` vs the clinician's stored identity document | `< 0.85` |
 | `signature_detection` | `ocr.detect_signature` | not detected |
 
@@ -167,8 +164,13 @@ handlers answer `{"supported": false}`. No check row is raised from them, becaus
 answer is noise in the review queue rather than safety. Wiring the two remaining checks is a small
 addition once the handlers are real.
 
-`type_match` only appears when a model tier is configured. Under `AGENT_TIER=deterministic` no
-opinion is sought, so none is reported — an absent opinion is not a disagreement.
+`type_match` only appears when the OCR connector answers `observed_type`, which today means
+`OCR_MODE=real`. The sandbox never sees the declared type, so a type it invented would disagree at
+random; it answers none, and an absent opinion is not a disagreement.
+
+`document_checks.model` and `ocr_results.model` name whatever model the connector reports having run
+— `gpt-4o-mini` under `OCR_MODE=real`, `ocr-sandbox` otherwise. A row naming a model that did not
+run is worse than a row naming none, so the connector states it rather than the agent assuming it.
 
 ---
 
@@ -607,29 +609,55 @@ writing a third copy.
 
 ```mermaid
 flowchart TD
-    G["POST /reports/generate"] --> CF["compliance.evaluate_*<br/>findings"]
-    CF --> DR["report.draft<br/>Opus writes prose · numbers copied verbatim"]
+    UP["document pipeline<br/>after verification"] -->|"only_if_gaps: true"| CF
+    CH["/chat · 'generate a report'<br/>refused without compliance:report"] --> CF
+    CF["compliance.evaluate_*<br/>findings"]
+    CF -->|"only_if_gaps and no gaps"| NOOP["no row, no model call<br/>status: not_needed"]
+    CF --> DR["report.draft<br/>deep model writes prose · numbers copied verbatim"]
     DR --> PR["compliance_reports<br/>status: pending_approval"]
-    PR --> AE["AwaitingApprovalEvent<br/>the SSE stream ends here"]
-    AE --> HOLD["waits for a human<br/>nothing has been sent"]
+    PR --> HOLD["waits for a human<br/>nothing has been sent"]
     HOLD --> AP["POST /reports/id/approve<br/>sets approved_by"]
-    AP --> DL["report_delivery_task<br/>NOT an agent capability"]
+    AP --> DL["report_delivery_task · NOT BUILT<br/>never an agent capability"]
     DL --> NO["D4 email / HRMS<br/>notifications + idempotency_key"]
 ```
 
 | Capability | In | Out | Model | Calls |
 |---|---|---|---|---|
-| `draft` | `scope`, `clinician_id?`, `org_id` | `body{}`, `citations[]` | deep | D2, Compliance |
+| `draft` | `scope`, `clinician_id?`, `org_id`, `only_if_gaps?` | `body{}`, `citations[]` | deep | D2, Compliance |
 | `render` | `report_id`, `format` | `text` | none | D2 |
+
+### Who triggers a draft
+
+Two callers, and neither is a route that exists only to draft one:
+
+- **The document pipeline**, in `tasks/document_pipeline_task.py`, after `verification.verify` and
+  under the same `credential_id` guard — an identity document evidences nothing and changes nobody's
+  standing. It passes `only_if_gaps=True`.
+- **`/chat`**, through the orchestrator's `report` flow, when someone asks in so many words for a
+  report. It is the only flow in that graph that writes; see
+  [CHAT_ORCHESTRATION.md](CHAT_ORCHESTRATION.md) for the three guards that carry it.
+
+`only_if_gaps` is decided *inside* the agent, by `_after_evaluate`, rather than by the caller
+evaluating compliance first and then asking. The naive split reads the roster twice; widening
+`DraftInput` to accept the caller's findings instead would break the one thing this agent's design
+rests on — that findings arrive already decided by the Compliance Agent. The upload that closes a
+clinician's last gap is the common one, and it writes no row, spends no model call, and queues
+nobody an approval.
 
 `draft` consumes Compliance Agent findings unchanged and writes `compliance_reports` at
 `status='pending_approval'`. The prose is generated; every number and every citation is copied from
 the findings, so the report and the dashboard cannot disagree.
 
-**There is no `send` capability.** Delivery lives in `tasks/report_delivery_task.py`, which runs only
-after `POST /reports/{id}/approve` has set `approved_by`, and calls the D4 email/HRMS connectors
+**There is no `send` capability.** Delivery belongs in `tasks/report_delivery_task.py`, which runs
+only after `POST /reports/{id}/approve` has set `approved_by`, and calls the D4 email/HRMS connectors
 directly. Making delivery *not* a capability is stronger than a rule forbidding it — there is no code
 path by which an agent can send anything.
+
+**That task is not built yet.** Approval is: `POST /reports/{id}/approve` sets `approved_by` through
+D2's `approve_report`, which refuses anything not at `pending_approval` — approving an already-sent
+report would read as success and change nothing, and approving a rejected one would quietly undo
+somebody's decision. Until the delivery task exists, an approved report is a signed-off record that
+nothing has posted anywhere.
 
 ---
 
@@ -790,14 +818,17 @@ place.
 
 | Trigger | Runs |
 |---|---|
-| `POST /documents/upload` | `document.process` → `verification.verify` |
+| `POST /documents/upload` | `document.process` → `verification.verify` → `report.draft` (`only_if_gaps`) |
 | `POST /credentials/{id}/reverify` | `verification.verify` |
 | `GET /clinicians/{id}/compliance-status` | `compliance.evaluate_clinician` (synchronous) |
 | `GET /orgs/{org_id}/dashboard` | `compliance.evaluate_org` (synchronous) |
-| `POST /reports/generate` | `compliance.evaluate_*` → `report.draft` → stops at approval |
-| `POST /reports/{id}/approve` | `report_delivery_task` → D4 email/HRMS |
+| `GET /reports/{id}` | `report.render` — the stored body, never recomputed |
+| `POST /reports/{id}/approve` | D2 `approve_report` → sets `approved_by`. Delivery not built |
 | Celery beat, daily | expiry scan → `verification.verify` per expiring credential |
 | `POST /chat` | orchestrator plans 1–3 flows → whichever agents those flows need — [CHAT_ORCHESTRATION.md](CHAT_ORCHESTRATION.md) |
+
+There is no `POST /reports/generate`: the two triggers that actually draft a report are an upload and
+a `/chat` question, so a third entry point exists only if an admin needs a non-conversational one.
 
 A Celery task is the *trigger*; the agent is the *unit of work* — the same relationship an MCP server
 has to its adapter in D4.

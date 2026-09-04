@@ -203,6 +203,8 @@ class EventStep(StrEnum):
     D4_CREDENTIAL_API = "d4_credential_api"
     D4_HRMS = "d4_hrms"
     D4_OCR = "d4_ocr"
+    D3_COMPOSE = "d3_compose"      # orchestrator turning results into one answer
+    D3_REPORT = "d3_report"        # Report Agent drafting for approval
     AWAITING_APPROVAL = "awaiting_approval"
     COMPLETE = "complete"
     ERROR = "error"
@@ -406,7 +408,7 @@ async def publish(job_id: str, publisher: ...):
 }
 ```
 
-**Complete Event:**
+**Complete Event** (document pipeline)**:**
 ```json
 {
   "step": "complete",
@@ -414,9 +416,26 @@ async def publish(job_id: str, publisher: ...):
   "output": {
     "credential_document_id": "doc-123",
     "credential_id": "cred-456",
-    "escalated": []
+    "escalated": [],
+    "report_id": "rep-789",
+    "outcome": "match",
+    "credential_status": "verified",
+    "authority_status": "active",
+    "degraded": false
   }
 }
+```
+
+Identifiers, check names and enum values only — extracted fields and mismatch detail are PHI and stay
+off the wire until D5's egress mask exists.
+
+The last four keys are present only when the document produced a credential; an identity document
+evidences none, so it verifies nothing and reports nothing. `report_id` is `null` when the clinician
+had no mandatory gaps left after this upload — the Report Agent's `only_if_gaps` decided there was
+nothing worth queuing an approval for. The step that decided it is visible earlier in the stream:
+
+```json
+{ "step": "d3_report", "status": "done", "detail": "no gaps to report" }
 ```
 
 **Error Event:**

@@ -1,24 +1,35 @@
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, normalizeError } from '@/lib/api'
-import type { ChatTurn, Citation } from '@/lib/types'
+import type {
+  ChatTurn,
+  Citation,
+  ConversationDetail,
+  ConversationList,
+  CreatedConversation,
+} from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { EmptyState, PageTitle } from '@/components/states'
 import { useAuth } from '@/features/auth/AuthProvider'
 import { PipelineStepper } from '@/features/documents/PipelineStepper'
-import { titleize } from '@/lib/format'
+import { formatDateTime, titleize } from '@/lib/format'
+import { cn } from '@/lib/cn'
 
-/** Queued gives `{job_id, status}`; INLINE_TASKS gives the finished turn. */
-type ChatResponse = { job_id: string; status?: 'processing' } & Partial<ChatTurn>
-
+/** The live view of one message. `plan`/`candidates`/`reportId` exist only on
+ *  the turn that produced them — a resumed transcript carries text and citations. */
 interface Message {
   who: 'you' | 'system'
   text: string
   citations?: Citation[]
   plan?: string[]
   candidates?: ChatTurn['candidates']
+  reportId?: string | null
 }
+
+/** Queued gives `{job_id, status}`; INLINE_TASKS gives the finished turn. */
+type ChatResponse = { job_id: string; status?: 'processing' } & Partial<ChatTurn>
 
 const SUGGESTIONS = [
   'Which credentials is Dr. John missing?',
@@ -28,11 +39,20 @@ const SUGGESTIONS = [
 
 export function ChatPage() {
   const { account } = useAuth()
+  const queryClient = useQueryClient()
   const [messages, setMessages] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [jobId, setJobId] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
+
+  // This user's conversations, server-side and newest first. Owner-scoped by the
+  // API, so it survives a reload or a trip to a report without any local copy.
+  const { data: history } = useQuery({
+    queryKey: ['conversations'],
+    queryFn: async () => (await api.get<ConversationList>('/chat/conversations')).data,
+  })
+  const conversations = history?.conversations ?? []
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -48,8 +68,40 @@ export function ChatPage() {
         citations: turn.citations ?? [],
         plan: turn.plan ?? [],
         candidates: turn.needs_clarification ? (turn.candidates ?? []) : [],
+        reportId: turn.report_id ?? null,
       },
     ])
+    // The turn was persisted server-side; refresh the sidebar so a new thread
+    // appears and a continued one moves to the top.
+    queryClient.invalidateQueries({ queryKey: ['conversations'] })
+  }
+
+  // Landing here starts a *draft*: no session exists until either the first
+  // question implicitly mints one, or this button explicitly opens an empty
+  // thread. Its id is then sent with every turn that follows.
+  const newConversation = useMutation({
+    mutationFn: async () =>
+      (await api.post<CreatedConversation>('/chat/conversations')).data,
+    onSuccess: (created) => {
+      setMessages([])
+      setDraft('')
+      setSessionId(created.session_id)
+    },
+  })
+
+  // Load one conversation's transcript from the server. Text and citations only —
+  // the plan and clarification choices were live-turn state and are not stored.
+  async function resume(id: string) {
+    if (jobId || ask.isPending) return
+    const { data } = await api.get<ConversationDetail>(`/chat/conversations/${id}`)
+    setSessionId(data.session_id)
+    setMessages(
+      data.messages.map((message) => ({
+        who: message.role === 'user' ? 'you' : 'system',
+        text: message.content,
+        citations: message.citations,
+      })),
+    )
   }
 
   const ask = useMutation({
@@ -93,8 +145,53 @@ export function ChatPage() {
     <div className="mx-auto max-w-3xl">
       <PageTitle
         title="Ask"
-        subtitle="Answers are assembled from indexed records, and every number in one is cited."
+        subtitle={
+          sessionId
+            ? 'This thread carries its own context — a follow-up may say “he” or “that licence”.'
+            : 'Nothing is saved yet — your first question opens the thread. Every number in an answer is cited.'
+        }
+        actions={
+          <Button
+            variant="outline"
+            onClick={() => newConversation.mutate()}
+            disabled={!!jobId || ask.isPending || newConversation.isPending}
+          >
+            New conversation
+          </Button>
+        }
       />
+
+      <p className="mb-5 flex items-center gap-2 text-xs text-slate">
+        <span
+          className={cn('h-1.5 w-1.5 rounded-full', sessionId ? 'bg-notary' : 'bg-rule')}
+          aria-hidden
+        />
+        {sessionId ? 'Thread open' : 'Draft — no thread yet'}
+      </p>
+
+      {conversations.length > 0 && (
+        <details className="mb-5 border border-rule bg-surface">
+          <summary className="cursor-pointer px-4 py-2 text-xs text-notary hover:bg-notary-soft">
+            Past conversations ({conversations.length})
+          </summary>
+          <ul className="border-t border-rule">
+            {conversations.map((conversation) => (
+              <li key={conversation.id} className="border-b border-rule last:border-b-0">
+                <button
+                  onClick={() => resume(conversation.id)}
+                  className={cn(
+                    'block w-full px-4 py-2 text-left text-sm hover:bg-paper',
+                    conversation.id === sessionId ? 'text-notary' : 'text-ink',
+                  )}
+                >
+                  <span className="block truncate">{conversation.title ?? 'New conversation'}</span>
+                  <span className="text-xs text-slate">{formatDateTime(conversation.updated_at)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       <div className="grid gap-5">
         {messages.length === 0 && (
@@ -144,14 +241,39 @@ export function ChatPage() {
                 </div>
               )}
 
+              {message.reportId && (
+                <p className="border-t border-rule px-4 py-3 text-sm">
+                  <Link
+                    to={`/reports/${message.reportId}`}
+                    className="font-medium text-notary underline-offset-2 hover:underline"
+                  >
+                    Open the drafted report
+                  </Link>
+                  <span className="text-slate"> — it is waiting for a person to approve it.</span>
+                </p>
+              )}
+
+              {/* `text` is the citation — the policy clause, or the board's own
+                  word. `reference` is the id or timestamp you look it up by, so
+                  it sits underneath rather than standing in for the evidence. */}
               {message.citations && message.citations.length > 0 && (
                 <ul className="border-t border-rule bg-paper/50 p-4">
                   {message.citations.map((citation, position) => (
-                    <li key={position} className="rail mb-2 last:mb-0">
+                    <li key={position} className="rail mb-3 last:mb-0">
                       <span className="block font-medium uppercase tracking-[0.08em]">
                         {titleize(citation.source)}
+                        {citation.degraded && (
+                          <span className="ml-2 normal-case tracking-normal text-state-expiring_soon">
+                            registry unreachable — this is stale, not negative
+                          </span>
+                        )}
                       </span>
-                      <span className="font-mono">{citation.reference}</span>
+                      <span className="mt-0.5 block text-ink">{citation.text}</span>
+                      {citation.reference && (
+                        <span className="mt-0.5 block font-mono text-[0.6875rem] opacity-70">
+                          {citation.reference}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>

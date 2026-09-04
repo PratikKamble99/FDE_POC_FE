@@ -11,6 +11,7 @@ export const PIPELINE_STEPS = [
   'd4_credential_api',
   'd4_hrms',
   'd3_compose',
+  'd3_report',
 ] as const
 
 export const STEP_LABELS: Record<string, string> = {
@@ -23,6 +24,7 @@ export const STEP_LABELS: Record<string, string> = {
   d4_credential_api: 'Checking the credential library',
   d4_hrms: 'Syncing with HRMS',
   d3_compose: 'Composing the answer',
+  d3_report: 'Drafting a compliance report',
   awaiting_approval: 'Waiting for approval',
   complete: 'Done',
   error: 'Failed',

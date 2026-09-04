@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api, setSessionLostHandler } from '@/lib/api'
-import type { Account, PlatformRole } from '@/lib/types'
+import type { Account } from '@/lib/types'
 
 const STORAGE_KEY = 'fde.account'
 
@@ -28,6 +28,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // on the page for no gain, since the browser already sends them.
   const [account, setAccount] = useState<Account | null>(readStored)
 
+  /**
+   * Clears this device's copy of the session and nothing else.
+   *
+   * There is no `POST /auth/logout`, and the access and refresh tokens live in
+   * httpOnly cookies that script cannot touch — so the session itself stays
+   * valid until it expires. A logout route that clears them server-side is the
+   * only thing that can actually end one; the UI says "on this device" rather
+   * than implying otherwise.
+   */
   const signOut = useCallback(() => {
     sessionStorage.removeItem(STORAGE_KEY)
     setAccount(null)
@@ -65,5 +74,3 @@ export function homeFor(account: Account): string {
   if (account.role === 'clinician') return '/me'
   return '/'
 }
-
-export const DASHBOARD_ROLES: PlatformRole[] = ['hr', 'compliance_officer', 'admin']

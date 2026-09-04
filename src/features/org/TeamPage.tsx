@@ -47,6 +47,11 @@ export function TeamPage() {
   const [tab, setTab] = useState<'clinicians' | 'users'>('clinicians')
   const [issued, setIssued] = useState<IssuedLogin[] | null>(null)
 
+  // Both tabs post to routes gated on `users:create`, which only admin holds —
+  // and the route guard on /team checks the same scope, so anyone who reaches
+  // this page can use either tab. No second gate needed here.
+  const tabs = ['clinicians', 'users'] as const
+
   return (
     <>
       <PageTitle
@@ -55,7 +60,7 @@ export function TeamPage() {
       />
 
       <div className="mb-6 flex border-b border-rule">
-        {(['clinicians', 'users'] as const).map((name) => (
+        {tabs.map((name) => (
           <button
             key={name}
             onClick={() => setTab(name)}

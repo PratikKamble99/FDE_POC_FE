@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { api, normalizeError } from '@/lib/api'
-import { CREDENTIAL_TYPES } from '@/lib/types'
+import { CREDENTIAL_TYPES, type DocumentPipelineOutput } from '@/lib/types'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
@@ -12,7 +12,13 @@ import { Field } from '@/components/ui/field'
 import { PipelineStepper } from './PipelineStepper'
 import { credentialLabel } from '@/lib/format'
 
-/** Queued gives a job id; INLINE_TASKS gives the finished document. */
+/**
+ * Three shapes, not two:
+ *   queued   { job_id, document_id, status: "processing" } — follow the stream
+ *   deduped  { job_id, document_id, status: "processed" }  — identical bytes,
+ *                                                            pipeline did not re-run
+ *   inline   { job_id, ...GET /documents/{id} }            — INLINE_TASKS=true
+ */
 type UploadResponse = { job_id: string; document_id?: string; status?: string; id?: string }
 
 const IDENTITY = '__identity__'
@@ -57,18 +63,32 @@ export function UploadDialog({
       setDocumentId(id)
       if (response.status === 'processing') {
         setJobId(response.job_id)
-      } else {
-        queryClient.invalidateQueries()
-        finish(id)
+        return
       }
+      // Identical bytes already processed in this org: the same document, and
+      // OCR cannot produce a different answer from identical input. Say so
+      // rather than letting it look like a fresh run.
+      if (response.status === 'processed') {
+        toast('That file was already on record, so it was not read again.')
+      }
+      queryClient.invalidateQueries()
+      finish(id, null)
     },
     onError: (error) => toast.error(normalizeError(error).message),
   })
 
-  function finish(id: string | null) {
+  function finish(id: string | null, reportId: string | null) {
     onOpenChange(false)
     reset()
     if (id) navigate(`/documents/${id}`)
+    // A shortcut to the report the pipeline just drafted; it is also in the
+    // Reports list, so this is convenience, not the only way back.
+    if (reportId) {
+      toast('A compliance report was drafted and is waiting for approval.', {
+        duration: 10_000,
+        action: { label: 'Open it', onClick: () => navigate(`/reports/${reportId}`) },
+      })
+    }
   }
 
   const busy = upload.isPending || jobId !== null
@@ -92,9 +112,13 @@ export function UploadDialog({
           <div className="mt-6">
             <PipelineStepper
               jobId={jobId}
-              onDone={() => {
+              onDone={(output) => {
+                const result = (output ?? {}) as DocumentPipelineOutput
                 queryClient.invalidateQueries()
-                finish(documentId)
+                // `report_id` is null when the clinician had no mandatory gaps
+                // left — the upload that closes the last one writes no report,
+                // and queues nobody an approval.
+                finish(documentId ?? result.credential_document_id ?? null, result.report_id ?? null)
               }}
             />
           </div>

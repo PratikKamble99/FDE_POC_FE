@@ -64,8 +64,9 @@ read next. But the model still chooses only from a fixed set of flows, and the w
 
 The two rows that still say "yes" are the load-bearing ones:
 
-**Reachable domains stay static.** Re-planning picks from the same four flows compiled into the
-graph. A model can only ever ask for work the graph already knows how to do, so `CapabilityDef.calls`
+**Reachable domains stay static.** Re-planning picks from the flows compiled into the
+graph — and from fewer than the initial plan may, since `report` is excluded from it entirely (§8).
+A model can only ever ask for work the graph already knows how to do, so `CapabilityDef.calls`
 — the mechanism that makes "the Compliance Agent never calls D4" a runtime check rather than a
 comment — keeps meaning what it meant.
 
@@ -148,7 +149,7 @@ already correct. Here `results` genuinely accumulates across flows, so it takes 
 
 ## 4. Question shapes and flows
 
-Six question shapes, four flows. Three of the shapes differ only in which slice of the findings the
+Seven question shapes, five flows. Three of the shapes differ only in which slice of the findings the
 composer speaks to, so the expensive call happens once and `focus` selects from it.
 
 | Question shape | Example | Flow | `focus` | Underlying call |
@@ -159,6 +160,11 @@ composer speaks to, so the expensive call happens once and `focus` selects from 
 | `source_comparison` | "Compare the certificate with government records" | `verification` | — | D2 `load_credential_verification` |
 | `org_status` | "How many nurses are non-compliant?" | `org` | — | `compliance.evaluate_org` · **HR+ only** |
 | `policy_lookup` | "What does policy require for a nurse in CA?" | `policy` | — | D2 `load_policy_requirements` |
+| `report_request` | "Generate a compliance report for Dr. John" | `report` | — | `report.draft` · **`compliance:report` only** · §8 |
+
+`report` is the only one of these that is not a question, and the only flow that writes. A named
+person scopes the report to them, a question naming nobody scopes it to the roster — which is the one
+place a missing name is an answer rather than a clarification.
 
 Anything else ends as a **question back**, not a statement — see §6. It used to end as a plain
 assertion of what the system could do, which told the user about the system rather than asking them
@@ -326,11 +332,11 @@ another's.
 
 ---
 
-## 8. A chat message never changes state
+## 8. A question changes nothing; a request to write one thing writes it
 
-Every flow is a **read**. `source_comparison` reports the `verifications` row the Verification Agent
-already wrote — including the narrative it generated at the time — and names the re-verify action
-when that judgment is stale. It does not call the registry.
+Every flow is a **read** except `report`. `source_comparison` reports the `verifications` row the
+Verification Agent already wrote — including the narrative it generated at the time — and names the
+re-verify action when that judgment is stale. It does not call the registry.
 
 ```mermaid
 flowchart LR
@@ -338,17 +344,40 @@ flowchart LR
         RV["POST /credentials/{id}/reverify"] --> VA["verification.verify"]
         VA --> EV[("external_verifications<br/>verifications<br/>credentials")]
     end
-    subgraph R["/chat — read only"]
+    subgraph R["/chat"]
         CH["POST /chat"] --> OR["Orchestrator"]
         OR --> RD["D2 reads"]
         RD -.reads.-> EV
+        OR -->|"report flow only"| RP[("compliance_reports<br/>pending_approval")]
     end
 ```
 
-Two reasons. A question is not an instruction, so a phrasing of "compare these" should not append an
-evidence row and update `credentials.status`. And it is the same rule the Compliance Agent already
-holds to — *"it never triggers a re-check"* — for the same reason: without it, a chat surface HR uses
-casually becomes a source of hundreds of registry calls.
+Two reasons for the rule. A question is not an instruction, so a phrasing of "compare these" should
+not append an evidence row and update `credentials.status`. And it is the same rule the Compliance
+Agent already holds to — *"it never triggers a re-check"* — for the same reason: without it, a chat
+surface HR uses casually becomes a source of hundreds of registry calls.
+
+### The one exception, and why it is bounded rather than trusted
+
+"Generate a compliance report for the nursing staff" is not a question, and answering it with a
+description of how to generate one would be pedantry. So `report` is a flow — the only one that
+leaves a row behind. It is on `planning.WRITES`, which is what buys it three guards:
+
+- **RBAC before the first domain call.** `forbidden()` refuses it to any role without
+  `compliance:report` — `admin` and `compliance_officer` hold it; HR, which reads compliance
+  perfectly legitimately, does not. That check used to run only for clinician logins, because the
+  only restricted flow was `org` and HR may read that; it now runs for every role.
+- **`replan` has no word for it.** `REPLAN_SCHEMA`'s flow enum excludes it and `sanitise_replan`
+  treats it as an unknown flow, so a plan can acquire a report only because a person asked for one —
+  never because a model, reasoning over facts it just gathered, decided one would be useful.
+- **It stops at `pending_approval`.** The Report Agent declares no `send` capability, so nothing
+  reachable from `/chat` can approve or deliver what it wrote. `compose` is told to say so, and the
+  fact sheet says it too, so the deterministic path makes the same claim the model does.
+
+The planner is told to name it only when the question asks in so many words for a report to be
+written, and the keyword fallback requires a verb of authorship beside the noun — *"report on her
+status"* is a question about her status, and a keyword rule that filed a document for it would be
+the worst kind of surprise.
 
 ---
 

@@ -4,11 +4,15 @@ import { api } from '@/lib/api'
 import type { DocumentDetail } from '@/lib/types'
 import { ErrorState, Loading, PageTitle } from '@/components/states'
 import { Button } from '@/components/ui/button'
+import { ReviewControls } from '@/features/reviews/ReviewControls'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { hasScope } from '@/lib/scopes'
 import { credentialLabel, formatDate, percent, titleize } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
 export function DocumentPage() {
   const { documentId } = useParams()
+  const { account } = useAuth()
   const { data, isPending, error } = useQuery({
     queryKey: ['document', documentId],
     queryFn: async () => (await api.get<DocumentDetail>(`/documents/${documentId}`)).data,
@@ -18,6 +22,7 @@ export function DocumentPage() {
   if (error) return <ErrorState error={error} />
 
   const pendingReview = data.checks.filter((c) => c.review_status === 'pending')
+  const canReview = hasScope(account?.role, 'documents:update')
 
   return (
     <>
@@ -38,12 +43,42 @@ export function DocumentPage() {
         }
       />
 
+      {/* Actionable where the reviewer already is. The queue at /reviews is the
+          same work across the org; this is the one document in front of you. */}
       {pendingReview.length > 0 && (
-        <p className="mb-6 border-l-2 border-state-pending bg-surface p-4 text-sm text-slate">
-          {pendingReview.length} {pendingReview.length === 1 ? 'check is' : 'checks are'} waiting
-          for a human to decide. The credential was still created and still passed on for
-          verification — it just stays out of satisfied counts until someone clears the check.
-        </p>
+        <section className="mb-8 border-l-2 border-state-expiring_soon bg-surface p-4">
+          <h2 className="font-display text-lg text-ink">
+            {pendingReview.length === 1
+              ? 'One check needs your decision'
+              : `${pendingReview.length} checks need your decision`}
+          </h2>
+          <p className="mt-1 text-sm text-slate">
+            The credential was still created and still went on for verification. But a pending check
+            holds the requirement at <em>pending</em> rather than <em>satisfied</em>, and
+            &ldquo;compliant&rdquo; is strict — so this clinician cannot be compliant until{' '}
+            {pendingReview.length === 1 ? 'it is' : 'they are'} decided.
+          </p>
+
+          <div className="mt-4 grid gap-4">
+            {pendingReview.map((check) => (
+              <div key={check.id} className="grid gap-2 border-t border-rule pt-4">
+                <p className="text-sm text-ink">
+                  {titleize(check.check_type)}
+                  <span className="ml-2 font-mono text-xs text-slate">
+                    confidence {percent(check.confidence)}
+                  </span>
+                </p>
+                {canReview ? (
+                  <ReviewControls checkId={check.id} />
+                ) : (
+                  <p className="text-xs text-slate">
+                    Someone with document permissions has to decide this one.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       <section>
