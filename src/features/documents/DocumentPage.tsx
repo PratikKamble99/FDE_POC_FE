@@ -10,6 +10,16 @@ import { hasScope } from '@/lib/scopes'
 import { credentialLabel, formatDate, percent, titleize } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
+/** Extracted fields are free-form JSON — the model nests objects and arrays for
+ *  things like addresses or endorsements, and `String()` on one of those is the
+ *  literal text "[object Object]". */
+function fieldText(value: unknown): string {
+  if (value == null || value === '') return '—'
+  if (Array.isArray(value)) return value.map(fieldText).join(', ')
+  if (typeof value === 'object') return JSON.stringify(value, null, 1)
+  return String(value)
+}
+
 export function DocumentPage() {
   const { documentId } = useParams()
   const { account } = useAuth()
@@ -90,8 +100,8 @@ export function DocumentPage() {
                 <dt className="text-[0.6875rem] font-medium uppercase tracking-[0.08em] text-slate">
                   {titleize(field)}
                 </dt>
-                <dd className="mt-1 break-words font-mono text-sm text-ink">
-                  {value == null || value === '' ? '—' : String(value)}
+                <dd className="mt-1 whitespace-pre-wrap break-words font-mono text-sm text-ink">
+                  {fieldText(value)}
                 </dd>
               </div>
             ))}
